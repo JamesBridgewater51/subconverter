@@ -67,8 +67,8 @@ jobs:
             exit 1
           fi
       
-      - name: Combine subscription URLs
-        id: combine
+      - name: Prepare subscription URLs file
+        id: prepare
         run: |
           # For manual trigger
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -84,34 +84,42 @@ jobs:
             FILENAME="${{ vars.UPLOAD_FILENAME || 'subconverter_config.yaml' }}"
           fi
           
-          # Combine pool URL and airport URLs with |
+          # Combine all URLs with | separator for subconverter
           COMBINED_URL="$POOL_URL"
           
           # Add airport URLs (one per line)
           while IFS= read -r url; do
-            # Skip empty lines
-            if [ -n "$url" ]; then
+            # Skip empty lines and comments
+            if [ -n "$url" ] && [[ ! "$url" =~ ^#.* ]]; then
               COMBINED_URL="$COMBINED_URL|$url"
             fi
           done <<< "$AIRPORT_URLS"
           
-          # URL encode the combined URL
-          ENCODED_URL=$(echo -n "$COMBINED_URL" | jq -sRr @uri)
+          # Write combined URL to a file in base directory
+          # Using echo to avoid newline issues
+          echo -n "$COMBINED_URL" > base/subscriptions.txt
+          
+          echo "Subscription URLs written to base/subscriptions.txt:"
+          cat base/subscriptions.txt
+          echo ""
+          
+          # URL encode the filename
           ENCODED_FILENAME=$(echo -n "$FILENAME" | jq -sRr @uri)
           
-          echo "combined_url=$COMBINED_URL" >> $GITHUB_OUTPUT
-          echo "encoded_url=$ENCODED_URL" >> $GITHUB_OUTPUT
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "upload_filename=$ENCODED_FILENAME" >> $GITHUB_OUTPUT
       
       - name: Convert and upload to Gist
         run: |
-          REQUEST_URL="http://localhost:25500/sub?target=${{ steps.combine.outputs.target }}&url=${{ steps.combine.outputs.encoded_url }}&upload=true&upload_path=${{ steps.combine.outputs.upload_filename }}"
-          
+          # Use local file path - subconverter supports reading from local files
+          # The path is relative to the base directory
           echo "Sending request to subconverter..."
-          echo "Combined URLs: ${{ steps.combine.outputs.combined_url }}"
+          echo "Using local file: subscriptions.txt"
           
-          RESPONSE=$(curl -v -o response.txt -w "%{http_code}" "$REQUEST_URL" 2>&1)
+          # Use curl to call subconverter with local file path
+          RESPONSE=$(curl -v -o response.txt -w "%{http_code}" \
+            "http://localhost:25500/sub?target=${{ steps.prepare.outputs.target }}&url=subscriptions.txt&upload=true&upload_path=${{ steps.prepare.outputs.upload_filename }}" \
+            2>&1)
           HTTP_CODE=$(tail -1 <<< "$RESPONSE")
           
           echo "HTTP Status Code: $HTTP_CODE"
@@ -119,7 +127,9 @@ jobs:
           cat response.txt
           
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "Request failed with status code $HTTP_CODE"
+            echo "❌ Request failed with status code $HTTP_CODE"
+            echo ""
+            echo "Docker logs:"
             docker logs subconverter
             exit 1
           fi
