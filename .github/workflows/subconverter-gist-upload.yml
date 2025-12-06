@@ -113,15 +113,31 @@ jobs:
       
       - name: Convert and upload to Gist
         run: |
-          # Use file:// protocol to reference the local file in the container
-          FILE_URL="file://${{ steps.prepare.outputs.urls_file }}"
-          ENCODED_FILE_URL=$(echo -n "$FILE_URL" | jq -sRr @uri)
+          # Read URLs from file and join with pipe separator (subconverter format)
+          URLS_FILE="${{ github.workspace }}/base/subscription_urls.txt"
           
-          REQUEST_URL="http://localhost:25500/sub?target=${{ steps.prepare.outputs.target }}&url=$ENCODED_FILE_URL&upload=true&upload_path=${{ steps.prepare.outputs.upload_filename }}"
+          # Read all non-empty lines, URL-encode each, and join with pipe
+          COMBINED_URLS=""
+          while IFS= read -r url || [ -n "$url" ]; do
+            # Skip empty lines
+            if [ -n "$url" ]; then
+              # URL-encode the subscription URL
+              ENCODED_URL=$(echo -n "$url" | jq -sRr @uri)
+              if [ -z "$COMBINED_URLS" ]; then
+                COMBINED_URLS="$ENCODED_URL"
+              else
+                COMBINED_URLS="${COMBINED_URLS}|${ENCODED_URL}"
+              fi
+            fi
+          done < "$URLS_FILE"
+          
+          # URL-encode the entire combined string (to escape the pipes)
+          FINAL_URL=$(echo -n "$COMBINED_URLS" | jq -sRr @uri)
+          
+          REQUEST_URL="http://localhost:25500/sub?target=${{ steps.prepare.outputs.target }}&url=${FINAL_URL}&upload=true&upload_path=${{ steps.prepare.outputs.upload_filename }}"
           
           echo "Sending request to subconverter..."
-          echo "Processing ${{ steps.prepare.outputs.url_count }} subscription URLs from file"
-          echo "File path in container: ${{ steps.prepare.outputs.urls_file }}"
+          echo "Processing ${{ steps.prepare.outputs.url_count }} subscription URLs"
           
           RESPONSE=$(curl -v -o response.txt -w "%{http_code}" "$REQUEST_URL" 2>&1)
           HTTP_CODE=$(tail -1 <<< "$RESPONSE")
@@ -135,7 +151,7 @@ jobs:
             echo "=== Subconverter logs ==="
             docker logs subconverter
             echo "=== URLs file content ==="
-            cat ${{ github.workspace }}/base/subscription_urls.txt
+            cat "$URLS_FILE"
             exit 1
           fi
           
