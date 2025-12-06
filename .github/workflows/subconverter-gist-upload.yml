@@ -1,0 +1,133 @@
+name: Subconverter Gist Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      gist_pool_url:
+        description: 'Single subscription pool Gist URL'
+        required: true
+        type: string
+      airport_urls:
+        description: 'Airport subscription URLs (one per line)'
+        required: true
+        type: string
+      target:
+        description: 'Target format (clash, surge, etc.)'
+        required: false
+        default: 'clash'
+        type: string
+      upload_filename:
+        description: 'Filename for uploaded Gist'
+        required: false
+        default: 'subconverter_config.yaml'
+        type: string
+  schedule:
+    # Run daily at 00:00 UTC (08:00 Beijing time)
+    - cron: '0 0 * * *'
+
+jobs:
+  convert-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Configure Gist token
+        run: |
+          cat > base/gistconf.ini << EOF
+          [common]
+          token = ${{ secrets.GIST_TOKEN }}
+          EOF
+      
+      - name: Start Subconverter service
+        run: |
+          docker run -d \
+            --name subconverter \
+            -p 25500:25500 \
+            -v ${{ github.workspace }}/base:/base \
+            tindy2013/subconverter:latest
+      
+      - name: Wait for service to be ready
+        run: |
+          echo "Waiting for subconverter service..."
+          for i in {1..30}; do
+            if curl -s http://localhost:25500/version > /dev/null 2>&1; then
+              echo "Service is ready!"
+              break
+            fi
+            echo "Attempt $i: Service not ready yet, waiting..."
+            sleep 2
+          done
+          
+          # Final check
+          if ! curl -s http://localhost:25500/version > /dev/null 2>&1; then
+            echo "Service failed to start"
+            docker logs subconverter
+            exit 1
+          fi
+      
+      - name: Combine subscription URLs
+        id: combine
+        run: |
+          # For manual trigger
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            POOL_URL="${{ github.event.inputs.gist_pool_url }}"
+            AIRPORT_URLS="${{ github.event.inputs.airport_urls }}"
+            TARGET="${{ github.event.inputs.target }}"
+            FILENAME="${{ github.event.inputs.upload_filename }}"
+          else
+            # For scheduled runs, use repository variables/secrets
+            POOL_URL="${{ vars.GIST_POOL_URL || secrets.GIST_POOL_URL }}"
+            AIRPORT_URLS="${{ vars.AIRPORT_URLS || secrets.AIRPORT_URLS }}"
+            TARGET="${{ vars.TARGET || 'clash' }}"
+            FILENAME="${{ vars.UPLOAD_FILENAME || 'subconverter_config.yaml' }}"
+          fi
+          
+          # Combine pool URL and airport URLs with |
+          COMBINED_URL="$POOL_URL"
+          
+          # Add airport URLs (one per line)
+          while IFS= read -r url; do
+            # Skip empty lines
+            if [ -n "$url" ]; then
+              COMBINED_URL="$COMBINED_URL|$url"
+            fi
+          done <<< "$AIRPORT_URLS"
+          
+          # URL encode the combined URL
+          ENCODED_URL=$(echo -n "$COMBINED_URL" | jq -sRr @uri)
+          ENCODED_FILENAME=$(echo -n "$FILENAME" | jq -sRr @uri)
+          
+          echo "combined_url=$COMBINED_URL" >> $GITHUB_OUTPUT
+          echo "encoded_url=$ENCODED_URL" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "upload_filename=$ENCODED_FILENAME" >> $GITHUB_OUTPUT
+      
+      - name: Convert and upload to Gist
+        run: |
+          REQUEST_URL="http://localhost:25500/sub?target=${{ steps.combine.outputs.target }}&url=${{ steps.combine.outputs.encoded_url }}&upload=true&upload_path=${{ steps.combine.outputs.upload_filename }}"
+          
+          echo "Sending request to subconverter..."
+          echo "Combined URLs: ${{ steps.combine.outputs.combined_url }}"
+          
+          RESPONSE=$(curl -v -o response.txt -w "%{http_code}" "$REQUEST_URL" 2>&1)
+          HTTP_CODE=$(tail -1 <<< "$RESPONSE")
+          
+          echo "HTTP Status Code: $HTTP_CODE"
+          echo "Response:"
+          cat response.txt
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Request failed with status code $HTTP_CODE"
+            docker logs subconverter
+            exit 1
+          fi
+          
+          echo "✓ Successfully uploaded to Gist!"
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop subconverter || true
+          docker rm subconverter || true
