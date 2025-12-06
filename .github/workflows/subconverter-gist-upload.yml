@@ -88,13 +88,16 @@ jobs:
           URLS_FILE="${{ github.workspace }}/base/subscription_urls.txt"
           echo "$POOL_URL" > "$URLS_FILE"
           
-          # Add airport URLs (one per line)
+          # Add airport URLs - handle both space-separated and newline-separated
+          # First, convert any spaces to newlines, then process line by line
+          NORMALIZED_URLS=$(echo "$AIRPORT_URLS" | tr ' ' '\n')
+          
           while IFS= read -r url; do
             # Skip empty lines
             if [ -n "$url" ]; then
               echo "$url" >> "$URLS_FILE"
             fi
-          done <<< "$AIRPORT_URLS"
+          done <<< "$NORMALIZED_URLS"
           
           # Count total URLs for logging
           URL_COUNT=$(wc -l < "$URLS_FILE")
