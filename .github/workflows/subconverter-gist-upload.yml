@@ -67,8 +67,8 @@ jobs:
             exit 1
           fi
       
-      - name: Prepare subscription URLs file
-        id: prepare
+      - name: Combine subscription URLs
+        id: combine
         run: |
           # For manual trigger
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -84,28 +84,23 @@ jobs:
             FILENAME="${{ vars.UPLOAD_FILENAME || 'subconverter_config.yaml' }}"
           fi
           
-          # Combine all URLs with | separator for subconverter
+          # Combine pool URL and airport URLs with |
           COMBINED_URL="$POOL_URL"
           
           # Add airport URLs (one per line)
           while IFS= read -r url; do
-            # Skip empty lines and comments
-            if [ -n "$url" ] && [[ ! "$url" =~ ^#.* ]]; then
+            # Skip empty lines
+            if [ -n "$url" ]; then
               COMBINED_URL="$COMBINED_URL|$url"
             fi
           done <<< "$AIRPORT_URLS"
           
-          # Write combined URL to a file in base directory
-          # Using echo to avoid newline issues
-          echo -n "$COMBINED_URL" > base/subscriptions.txt
-          
-          echo "Subscription URLs written to base/subscriptions.txt:"
-          cat base/subscriptions.txt
-          echo ""
-          
-          # URL encode the filename
+          # URL encode the combined URL
+          ENCODED_URL=$(echo -n "$COMBINED_URL" | jq -sRr @uri)
           ENCODED_FILENAME=$(echo -n "$FILENAME" | jq -sRr @uri)
           
+          echo "combined_url=$COMBINED_URL" >> $GITHUB_OUTPUT
+          echo "encoded_url=$ENCODED_URL" >> $GITHUB_OUTPUT
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "upload_filename=$ENCODED_FILENAME" >> $GITHUB_OUTPUT
       
@@ -118,23 +113,45 @@ jobs:
           
           # Use curl to call subconverter with local file path
           RESPONSE=$(curl -v -o response.txt -w "%{http_code}" \
-            "http://localhost:25500/sub?target=${{ steps.prepare.outputs.target }}&url=subscriptions.txt&upload=true&upload_path=${{ steps.prepare.outputs.upload_filename }}" \
+            "http://localhost:25500/sub?target=${{ steps.combine.outputs.target }}&url=${{ steps.combine.outputs.encoded_url }}&upload=true&upload_path=${{ steps.combine.outputs.upload_filename }}" \
             2>&1)
           HTTP_CODE=$(tail -1 <<< "$RESPONSE")
           
           echo "HTTP Status Code: $HTTP_CODE"
-          echo "Response:"
+          echo "Response Content:"
           cat response.txt
+          echo ""
+          
+          # Check Docker logs for Gist upload confirmation
+          echo "=== Subconverter Logs ==="
+          docker logs subconverter 2>&1 | tail -50
+          echo "========================="
           
           if [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Request failed with status code $HTTP_CODE"
-            echo ""
-            echo "Docker logs:"
-            docker logs subconverter
             exit 1
           fi
           
-          echo "✓ Successfully uploaded to Gist!"
+          # Check if response contains Gist URL or upload success message
+          if docker logs subconverter 2>&1 | grep -q "Writing to Gist success"; then
+            echo "✅ Gist upload confirmed!"
+            
+            # Extract and display the Raw URL
+            GIST_URL=$(docker logs subconverter 2>&1 | grep "Raw URL:" | tail -1 | sed 's/.*Raw URL: //')
+            if [ -n "$GIST_URL" ]; then
+              echo ""
+              echo "🔗 Your Gist URL:"
+              echo "$GIST_URL"
+              echo ""
+              echo "You can use this URL to subscribe in Clash!"
+            fi
+          else
+            echo "⚠️  Warning: No 'Writing to Gist success' message found in logs."
+            echo "The configuration was generated successfully, but Gist upload may have failed."
+            echo "Please check your GIST_TOKEN permissions."
+          fi
+          
+          echo "✓ Request completed successfully!"
       
       - name: Cleanup
         if: always()
