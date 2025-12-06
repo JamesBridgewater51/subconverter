@@ -67,8 +67,8 @@ jobs:
             exit 1
           fi
       
-      - name: Combine subscription URLs
-        id: combine
+      - name: Prepare subscription URLs
+        id: prepare
         run: |
           # For manual trigger
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -84,74 +84,59 @@ jobs:
             FILENAME="${{ vars.UPLOAD_FILENAME || 'subconverter_config.yaml' }}"
           fi
           
-          # Combine pool URL and airport URLs with |
-          COMBINED_URL="$POOL_URL"
+          # Write URLs to a file in the base directory (mounted to container)
+          URLS_FILE="${{ github.workspace }}/base/subscription_urls.txt"
+          echo "$POOL_URL" > "$URLS_FILE"
           
           # Add airport URLs (one per line)
           while IFS= read -r url; do
             # Skip empty lines
             if [ -n "$url" ]; then
-              COMBINED_URL="$COMBINED_URL|$url"
+              echo "$url" >> "$URLS_FILE"
             fi
           done <<< "$AIRPORT_URLS"
           
-          # URL encode the combined URL
-          ENCODED_URL=$(echo -n "$COMBINED_URL" | jq -sRr @uri)
+          # Count total URLs for logging
+          URL_COUNT=$(wc -l < "$URLS_FILE")
+          echo "Total URLs written to file: $URL_COUNT"
+          
+          # Encode filename
           ENCODED_FILENAME=$(echo -n "$FILENAME" | jq -sRr @uri)
           
-          echo "combined_url=$COMBINED_URL" >> $GITHUB_OUTPUT
-          echo "encoded_url=$ENCODED_URL" >> $GITHUB_OUTPUT
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "upload_filename=$ENCODED_FILENAME" >> $GITHUB_OUTPUT
+          echo "urls_file=/base/subscription_urls.txt" >> $GITHUB_OUTPUT
+          echo "url_count=$URL_COUNT" >> $GITHUB_OUTPUT
       
       - name: Convert and upload to Gist
         run: |
-          # Use local file path - subconverter supports reading from local files
-          # The path is relative to the base directory
-          echo "Sending request to subconverter..."
-          echo "Using local file: subscriptions.txt"
+          # Use file:// protocol to reference the local file in the container
+          FILE_URL="file://${{ steps.prepare.outputs.urls_file }}"
+          ENCODED_FILE_URL=$(echo -n "$FILE_URL" | jq -sRr @uri)
           
-          # Use curl to call subconverter with local file path
-          RESPONSE=$(curl -v -o response.txt -w "%{http_code}" \
-            "http://localhost:25500/sub?target=${{ steps.combine.outputs.target }}&url=${{ steps.combine.outputs.encoded_url }}&upload=true&upload_path=${{ steps.combine.outputs.upload_filename }}" \
-            2>&1)
+          REQUEST_URL="http://localhost:25500/sub?target=${{ steps.prepare.outputs.target }}&url=$ENCODED_FILE_URL&upload=true&upload_path=${{ steps.prepare.outputs.upload_filename }}"
+          
+          echo "Sending request to subconverter..."
+          echo "Processing ${{ steps.prepare.outputs.url_count }} subscription URLs from file"
+          echo "File path in container: ${{ steps.prepare.outputs.urls_file }}"
+          
+          RESPONSE=$(curl -v -o response.txt -w "%{http_code}" "$REQUEST_URL" 2>&1)
           HTTP_CODE=$(tail -1 <<< "$RESPONSE")
           
           echo "HTTP Status Code: $HTTP_CODE"
-          echo "Response Content:"
+          echo "Response:"
           cat response.txt
-          echo ""
-          
-          # Check Docker logs for Gist upload confirmation
-          echo "=== Subconverter Logs ==="
-          docker logs subconverter 2>&1 | tail -50
-          echo "========================="
           
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Request failed with status code $HTTP_CODE"
+            echo "Request failed with status code $HTTP_CODE"
+            echo "=== Subconverter logs ==="
+            docker logs subconverter
+            echo "=== URLs file content ==="
+            cat ${{ github.workspace }}/base/subscription_urls.txt
             exit 1
           fi
           
-          # Check if response contains Gist URL or upload success message
-          if docker logs subconverter 2>&1 | grep -q "Writing to Gist success"; then
-            echo "✅ Gist upload confirmed!"
-            
-            # Extract and display the Raw URL
-            GIST_URL=$(docker logs subconverter 2>&1 | grep "Raw URL:" | tail -1 | sed 's/.*Raw URL: //')
-            if [ -n "$GIST_URL" ]; then
-              echo ""
-              echo "🔗 Your Gist URL:"
-              echo "$GIST_URL"
-              echo ""
-              echo "You can use this URL to subscribe in Clash!"
-            fi
-          else
-            echo "⚠️  Warning: No 'Writing to Gist success' message found in logs."
-            echo "The configuration was generated successfully, but Gist upload may have failed."
-            echo "Please check your GIST_TOKEN permissions."
-          fi
-          
-          echo "✓ Request completed successfully!"
+          echo "✓ Successfully uploaded to Gist!"
       
       - name: Cleanup
         if: always()
