@@ -77,9 +77,9 @@ jobs:
             TARGET="${{ github.event.inputs.target }}"
             FILENAME="${{ github.event.inputs.upload_filename }}"
           else
-            # For scheduled runs, use repository variables/secrets
-            POOL_URL="${{ vars.GIST_POOL_URL || secrets.GIST_POOL_URL }}"
-            AIRPORT_URLS="${{ vars.AIRPORT_URLS || secrets.AIRPORT_URLS }}"
+            # For scheduled runs, use repository secrets
+            POOL_URL="${{ secrets.GIST_POOL_URL }}"
+            AIRPORT_URLS="${{ secrets.AIRPORT_URLS }}"
             TARGET="${{ vars.TARGET || 'clash' }}"
             FILENAME="${{ vars.UPLOAD_FILENAME || 'subconverter_config.yaml' }}"
           fi
